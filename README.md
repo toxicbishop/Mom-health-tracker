@@ -9,6 +9,7 @@ A comprehensive health tracking Android application built with **Kotlin** and **
 ## ✨ Features
 
 ### 📊 Health Dashboard
+
 - Real-time date and time display
 - Quick overview of daily health metrics
 - Mood logging with emoji-based selection
@@ -16,6 +17,7 @@ A comprehensive health tracking Android application built with **Kotlin** and **
 - Clinical reports generation
 
 ### 💊 Medication Management
+
 - Track active prescriptions
 - Set medication reminders with custom times
 - Daily/Weekly/Custom frequency scheduling
@@ -23,6 +25,7 @@ A comprehensive health tracking Android application built with **Kotlin** and **
 - Progress tracking for medication adherence
 
 ### 📈 Vitals & Trends
+
 - Weight tracking with trend analysis
 - Blood pressure monitoring
 - Interactive charts and graphs
@@ -30,6 +33,7 @@ A comprehensive health tracking Android application built with **Kotlin** and **
 - Health insights and patterns
 
 ### 📅 Track Screen
+
 - Log daily health entries
 - Quick action buttons for common logs
 - Month/date navigation
@@ -37,6 +41,7 @@ A comprehensive health tracking Android application built with **Kotlin** and **
 - Floating action button for quick entry
 
 ### 👤 User Profile
+
 - Persistent login (remembers user)
 - Dark/Light theme toggle
 - Personal information management
@@ -52,15 +57,10 @@ A comprehensive health tracking Android application built with **Kotlin** and **
 - **Persistence:** SharedPreferences
 - **Styling:** Material 3 Design with custom theming
 
-## 📱 Screenshots
-
-| Home Dashboard | Medication | Vitals |
-|:---:|:---:|:---:|
-| Health overview | Prescription tracking | Trends & charts |
-
 ## 🚀 Getting Started
 
 ### Prerequisites
+
 - Android Studio Arctic Fox or later
 - JDK 17 or later
 - Android SDK 34
@@ -68,6 +68,7 @@ A comprehensive health tracking Android application built with **Kotlin** and **
 ### Installation
 
 1. **Clone the repository**
+
    ```bash
    git clone https://github.com/toxicbishop/Health-Tracker-App.git
    cd Health-Tracker-App
@@ -98,7 +99,7 @@ docker run --rm -v $(pwd)/output:/app/app/build/outputs health-track
 
 ## 📁 Project Structure
 
-```
+```text
 Health-Tracker-App/
 ├── app/
 │   ├── src/
@@ -158,9 +159,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 👨‍💻 Author
 
-**toxicbishop**
-
-- GitHub: [@toxicbishop](https://github.com/toxicbishop)
+Created by **toxicbishop** - GitHub: [@toxicbishop](https://github.com/toxicbishop)
 
 ## 🙏 Acknowledgments
 
@@ -169,7 +168,3 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - Android community for inspiration and support
 
 ---
-
-<p align="center">
-  Made with ❤️ for better health tracking
-</p>
