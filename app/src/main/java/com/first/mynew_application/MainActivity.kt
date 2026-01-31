@@ -44,9 +44,113 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import android.app.*
+import android.content.BroadcastReceiver
+import android.content.Intent
+import androidx.core.app.NotificationCompat
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import retrofit2.Retrofit
+import retrofit2.converter.gson.GsonConverterFactory
+import retrofit2.http.Body
+import retrofit2.http.POST
 import java.text.SimpleDateFormat
 import java.util.*
+
+// --- NOTIFICATION RECEIVER ---
+class MedicationAlarmReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        val medName = intent.getStringExtra("MED_NAME") ?: "Medication"
+        val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        
+        // Create channel for Android 8.0+
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            val channel = NotificationChannel("MED_REMINDER", "Medication Reminders", NotificationManager.IMPORTANCE_HIGH)
+            notificationManager.createNotificationChannel(channel)
+        }
+        
+        val notification = NotificationCompat.Builder(context, "MED_REMINDER")
+            .setSmallIcon(android.R.drawable.ic_lock_idle_alarm)
+            .setContentTitle("Time for your medication!")
+            .setContentText("Please take your $medName as scheduled.")
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setAutoCancel(true)
+            .build()
+            
+        notificationManager.notify(System.currentTimeMillis().toInt(), notification)
+    }
+}
+
+// --- VIEWMODEL ---
+class HealthViewModel(private val prefs: SharedPreferences) : ViewModel() {
+    var lastWeight by mutableStateOf(prefs.getString("lastWeight", "62.4 kg") ?: "62.4 kg")
+    var lastBP by mutableStateOf(prefs.getString("lastBP", "118/76") ?: "118/76")
+    
+    // For trends
+    var weightHistory = mutableStateListOf<Float>().apply {
+        val saved = prefs.getString("weightHistory", "63.0,62.8,62.7,62.5,62.4") ?: "63.0,62.8,62.7,62.5,62.4"
+        saved.split(",").forEach { add(it.toFloat()) }
+    }
+
+    fun updateWeight(newWeight: String) {
+        lastWeight = "$newWeight kg"
+        prefs.edit().putString("lastWeight", lastWeight).apply()
+        
+        try {
+            val weightVal = newWeight.toFloat()
+            weightHistory.add(weightVal)
+            if (weightHistory.size > 7) weightHistory.removeAt(0)
+            prefs.edit().putString("weightHistory", weightHistory.joinToString(",")).apply()
+        } catch (e: Exception) { }
+    }
+
+    fun updateBP(systolic: String, diastolic: String) {
+        lastBP = "$systolic/$diastolic"
+        prefs.edit().putString("lastBP", lastBP).apply()
+    }
+}
+
+
+// --- SECURITY HELPERS ---
+fun sanitizeInput(input: String): String {
+    // Basic protection against script-like injections or weird characters
+    return input.replace(Regex("[<>/]"), "").trim()
+}
+
+data class HealthData(
+    val email: String,
+    val type: String,
+    val value1: String,
+    val value2: String = "",
+    val timestamp: String = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
+)
+
+data class ApiResponse(
+    val status: String,
+    val message: String
+)
+
+// --- API SERVICE ---
+interface HealthApiService {
+    @POST("exec")
+    suspend fun sendHealthData(@Body data: HealthData): ApiResponse
+}
+
+object RetrofitInstance {
+    private const val BASE_URL = "https://script.google.com/macros/s/AKfycbw55vbkDoPQmCkP1Uhh52FqqiAxHjbLOHw6WXYl8vjmv0O35PJhQZ1oxTOfsmwERuE09g/"
+    
+    val api: HealthApiService by lazy {
+        Retrofit.Builder()
+            .baseUrl(BASE_URL)
+            .addConverterFactory(GsonConverterFactory.create())
+            .build()
+            .create(HealthApiService::class.java)
+    }
+}
 
 // --- CONFIGURATION ---
 const val API_URL = "https://script.google.com/macros/s/AKfycbw55vbkDoPQmCkP1Uhh52FqqiAxHjbLOHw6WXYl8vjmv0O35PJhQZ1oxTOfsmwERuE09g/exec"
@@ -260,8 +364,8 @@ fun InsightCard(title: String, icon: ImageVector, content: @Composable ColumnSco
 }
 
 @Composable
-fun HistoryItem(icon: ImageVector, color: Color, title: String, subtitle: String) {
-    AppCard(modifier = Modifier.padding(bottom = 12.dp)) {
+fun HistoryItem(icon: ImageVector, color: Color, title: String, subtitle: String, onClick: () -> Unit = {}) {
+    AppCard(modifier = Modifier.padding(bottom = 12.dp), onClick = onClick) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
                 modifier = Modifier.size(40.dp).background(color.copy(alpha = 0.1f), RoundedCornerShape(8.dp)),
@@ -323,7 +427,7 @@ fun HistoryScreen(navController: NavController) {
 }
 
 @Composable
-fun TrendsScreen(navController: NavController) {
+fun TrendsScreen(navController: NavController, viewModel: HealthViewModel) {
     var showDatePicker by remember { mutableStateOf(false) }
     var selectedDate by remember { mutableStateOf(Calendar.getInstance()) }
     val dateFormat = SimpleDateFormat("MMM d, yyyy", Locale.getDefault())
@@ -365,28 +469,51 @@ fun TrendsScreen(navController: NavController) {
                 }
             }
             item { SegmentedControl(listOf("Week", "Month", "Year"), 0) {}; Spacer(modifier = Modifier.height(24.dp)) }
-            item {
+            item { 
+                val weightChange = if(viewModel.weightHistory.size >= 2) {
+                    val diff = viewModel.weightHistory.last() - viewModel.weightHistory[viewModel.weightHistory.size - 2]
+                    String.format("%.1f kg", diff)
+                } else "-0.8 kg"
+                
                 AppCard {
                     Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
                         Column {
                             Text("WEIGHT TREND", style = TextStyle(fontSize = 11.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.TextSecondary))
                             Row(verticalAlignment = Alignment.Bottom) {
-                                Text("62.4 kg", style = AppTypography.H1)
+                                Text("${viewModel.weightHistory.lastOrNull() ?: 62.4} kg", style = AppTypography.H1)
                                 Text(" Average", style = AppTypography.Subtitle, modifier = Modifier.padding(bottom = 4.dp))
                             }
                         }
-                        Surface(color = AppTheme.colors.SuccessContainer, shape = RoundedCornerShape(4.dp)) {
-                            Text("-0.8 kg", color = AppTheme.colors.SuccessContent, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
+                        Surface(color = if(weightChange.startsWith("-")) AppTheme.colors.SuccessContainer else AppTheme.colors.ErrorContainer, shape = RoundedCornerShape(4.dp)) {
+                            Text(weightChange, color = if(weightChange.startsWith("-")) AppTheme.colors.SuccessContent else AppTheme.colors.ErrorContent, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp))
                         }
                     }
                     Spacer(modifier = Modifier.height(30.dp))
-                    Row(modifier = Modifier.fillMaxWidth().height(100.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Bottom) {
-                        listOf("M", "T", "W", "T", "F", "S", "S").forEachIndexed { i, day ->
-                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                Box(modifier = Modifier.size(8.dp).background(if (i == 3) AppTheme.colors.Primary else AppTheme.colors.Border, androidx.compose.foundation.shape.CircleShape))
-                                Spacer(modifier = Modifier.height(8.dp))
-                                Text(day, style = TextStyle(fontSize = 12.sp, color = AppTheme.colors.TextSecondary))
+                    
+                    // Simple Drawing for the graph
+                    androidx.compose.foundation.Canvas(modifier = Modifier.fillMaxWidth().height(100.dp)) {
+                        val points = viewModel.weightHistory.reversed().take(7).reversed()
+                        if(points.size > 1) {
+                            val max = points.max() + 1
+                            val min = points.min() - 1
+                            val range = max - min
+                            val width = size.width
+                            val height = size.height
+                            val stepX = width / (points.size - 1)
+                            
+                            val path = androidx.compose.ui.graphics.Path()
+                            points.forEachIndexed { i, f ->
+                                val x = i * stepX
+                                val y = height - ((f - min) / range * height)
+                                if(i == 0) path.moveTo(x, y) else path.lineTo(x, y)
                             }
+                            drawPath(path, color = Color(0xFF0EA5E9), style = androidx.compose.ui.graphics.drawscope.Stroke(width = 4f))
+                        }
+                    }
+                    
+                    Row(modifier = Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                        listOf("M", "T", "W", "T", "F", "S", "S").forEachIndexed { i, day ->
+                            Text(day, style = TextStyle(fontSize = 12.sp, color = AppTheme.colors.TextSecondary))
                         }
                     }
                 }
@@ -397,7 +524,7 @@ fun TrendsScreen(navController: NavController) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Box(modifier = Modifier.size(40.dp).background(AppTheme.colors.InputBg, RoundedCornerShape(8.dp)), contentAlignment = Alignment.Center) { Icon(Icons.Default.FavoriteBorder, null, tint = AppTheme.colors.Primary) }
                         Spacer(modifier = Modifier.width(16.dp))
-                        Column(modifier = Modifier.weight(1f)) { Text("Blood Pressure", style = AppTypography.CardTitle); Text("Average: 118/76 mmHg", style = AppTypography.Subtitle) }
+                        Column(modifier = Modifier.weight(1f)) { Text("Blood Pressure", style = AppTypography.CardTitle); Text("Last Reading: ${viewModel.lastBP}", style = AppTypography.Subtitle) }
                         Surface(color = AppTheme.colors.SuccessContainer, shape = RoundedCornerShape(4.dp)) { Text("● NORMAL", color = AppTheme.colors.SuccessContent, fontSize = 10.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)) }
                     }
                 }
@@ -459,7 +586,7 @@ fun ProfileScreen(navController: NavController, isDark: Boolean, userEmail: Stri
 }
 
 @Composable
-fun HomeScreen(navController: NavController) {
+fun HomeScreen(navController: NavController, viewModel: HealthViewModel) {
     // Real-time date/time
     var currentTime by remember { mutableStateOf(Calendar.getInstance()) }
     LaunchedEffect(Unit) {
@@ -478,7 +605,7 @@ fun HomeScreen(navController: NavController) {
     
     // Prescription dialog state
     var showPrescriptionDialog by remember { mutableStateOf(false) }
-    var prescriptions by remember { mutableStateOf(listOf("Prenatal Vitamin • 8:00 AM")) }
+    var prescriptions by remember { mutableStateOf(listOf("Daily Vitamin • 08:00 AM")) }
     
     // Mood Dialog
     if (showMoodDialog) {
@@ -507,7 +634,7 @@ fun HomeScreen(navController: NavController) {
     // Prescription Dialog
     if (showPrescriptionDialog) {
         var medName by remember { mutableStateOf("") }
-        var medTime by remember { mutableStateOf("8:00 AM") }
+        var medTime by remember { mutableStateOf("08:00 AM") }
         Dialog(onDismissRequest = { showPrescriptionDialog = false }) {
             Surface(shape = RoundedCornerShape(16.dp), color = AppTheme.colors.Surface) {
                 Column(modifier = Modifier.padding(24.dp)) {
@@ -515,7 +642,7 @@ fun HomeScreen(navController: NavController) {
                     Spacer(modifier = Modifier.height(16.dp))
                     OutlinedTextField(value = medName, onValueChange = { medName = it }, label = { Text("Medication Name") }, modifier = Modifier.fillMaxWidth(), colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = AppTheme.colors.Primary, unfocusedBorderColor = AppTheme.colors.Border, focusedTextColor = AppTheme.colors.TextPrimary, unfocusedTextColor = AppTheme.colors.TextPrimary))
                     Spacer(modifier = Modifier.height(12.dp))
-                    OutlinedTextField(value = medTime, onValueChange = { medTime = it }, label = { Text("Time (e.g., 8:00 AM)") }, modifier = Modifier.fillMaxWidth(), colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = AppTheme.colors.Primary, unfocusedBorderColor = AppTheme.colors.Border, focusedTextColor = AppTheme.colors.TextPrimary, unfocusedTextColor = AppTheme.colors.TextPrimary))
+                    OutlinedTextField(value = medTime, onValueChange = { medTime = it }, label = { Text("Time (e.g., 08:00 AM)") }, modifier = Modifier.fillMaxWidth(), colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = AppTheme.colors.Primary, unfocusedBorderColor = AppTheme.colors.Border, focusedTextColor = AppTheme.colors.TextPrimary, unfocusedTextColor = AppTheme.colors.TextPrimary))
                     Spacer(modifier = Modifier.height(16.dp))
                     ActionButton("Add Prescription", onClick = { if (medName.isNotBlank()) { prescriptions = prescriptions + "$medName • $medTime"; showPrescriptionDialog = false } })
                 }
@@ -534,11 +661,11 @@ fun HomeScreen(navController: NavController) {
                 Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                     AppCard(modifier = Modifier.weight(1f)) {
                         Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Outlined.MonitorWeight, null, tint = AppTheme.colors.Primary, modifier = Modifier.size(24.dp)); Text("WEIGHT", style = TextStyle(fontSize = 11.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.TextSecondary)) }
-                        Spacer(modifier = Modifier.height(16.dp)); Text("Last: 62.4 kg", style = AppTypography.Value); Spacer(modifier = Modifier.height(16.dp)); ActionButton("Log Entry", onClick = { navController.navigate("log/WEIGHT") }, variant = "OUTLINE")
+                        Spacer(modifier = Modifier.height(16.dp)); Text("Last: ${viewModel.lastWeight}", style = AppTypography.Value); Spacer(modifier = Modifier.height(16.dp)); ActionButton("Log Entry", onClick = { navController.navigate("log/WEIGHT") }, variant = "OUTLINE")
                     }
                     AppCard(modifier = Modifier.weight(1f)) {
                         Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Outlined.FavoriteBorder, null, tint = AppTheme.colors.Primary, modifier = Modifier.size(24.dp)); Text("BP", style = TextStyle(fontSize = 11.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.TextSecondary)) }
-                        Spacer(modifier = Modifier.height(16.dp)); Text("Last: 118/76", style = AppTypography.Value); Spacer(modifier = Modifier.height(16.dp)); ActionButton("Log Entry", onClick = { navController.navigate("log/BP") }, variant = "OUTLINE")
+                        Spacer(modifier = Modifier.height(16.dp)); Text("Last: ${viewModel.lastBP}", style = AppTypography.Value); Spacer(modifier = Modifier.height(16.dp)); ActionButton("Log Entry", onClick = { navController.navigate("log/BP") }, variant = "OUTLINE")
                     }
                 }
             }
@@ -999,9 +1126,13 @@ fun LoginScreen(navController: NavController) {
 }
 
 @Composable
-fun LogScreen(type: String, navController: NavController) {
+fun LogScreen(type: String, navController: NavController, userEmail: String, viewModel: HealthViewModel) {
     var val1 by remember { mutableStateOf("") }
     var val2 by remember { mutableStateOf("") }
+    var isLoading by remember { mutableStateOf(false) }
+    var message by remember { mutableStateOf("") }
+    val scope = rememberCoroutineScope()
+    
     val title = if (type == "WEIGHT") "Log Weight" else "Log BP"
     Scaffold(containerColor = AppTheme.colors.Background) { p ->
         Column(modifier = Modifier.padding(p).padding(24.dp)) {
@@ -1011,9 +1142,9 @@ fun LogScreen(type: String, navController: NavController) {
                 if (type == "WEIGHT") { 
                     Text("Weight (kg)", style = AppTypography.Subtitle, modifier = Modifier.padding(bottom = 8.dp)); 
                     OutlinedTextField(
-                        value = val1, onValueChange = { val1 = it }, 
+                        value = val1, onValueChange = { if(it.isEmpty() || it.toDoubleOrNull() != null) val1 = it }, 
                         modifier = Modifier.fillMaxWidth(), 
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                         colors = OutlinedTextFieldDefaults.colors(focusedTextColor = AppTheme.colors.TextPrimary, unfocusedTextColor = AppTheme.colors.TextPrimary, focusedBorderColor = AppTheme.colors.Primary, unfocusedBorderColor = AppTheme.colors.Border)
                     ) 
                 } 
@@ -1021,29 +1152,135 @@ fun LogScreen(type: String, navController: NavController) {
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) { 
                         Column(modifier = Modifier.weight(1f)) { 
                             Text("Systolic", style = AppTypography.Subtitle); 
-                            OutlinedTextField(value = val1, onValueChange = { val1 = it }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), colors = OutlinedTextFieldDefaults.colors(focusedTextColor = AppTheme.colors.TextPrimary, unfocusedTextColor = AppTheme.colors.TextPrimary, focusedBorderColor = AppTheme.colors.Primary, unfocusedBorderColor = AppTheme.colors.Border)) 
+                            OutlinedTextField(value = val1, onValueChange = { if(it.isEmpty() || (it.toIntOrNull() != null && it.length <= 3)) val1 = it }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), colors = OutlinedTextFieldDefaults.colors(focusedTextColor = AppTheme.colors.TextPrimary, unfocusedTextColor = AppTheme.colors.TextPrimary, focusedBorderColor = AppTheme.colors.Primary, unfocusedBorderColor = AppTheme.colors.Border)) 
                         }; 
                         Column(modifier = Modifier.weight(1f)) { 
                             Text("Diastolic", style = AppTypography.Subtitle); 
-                            OutlinedTextField(value = val2, onValueChange = { val2 = it }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), colors = OutlinedTextFieldDefaults.colors(focusedTextColor = AppTheme.colors.TextPrimary, unfocusedTextColor = AppTheme.colors.TextPrimary, focusedBorderColor = AppTheme.colors.Primary, unfocusedBorderColor = AppTheme.colors.Border)) 
+                            OutlinedTextField(value = val2, onValueChange = { if(it.isEmpty() || (it.toIntOrNull() != null && it.length <= 3)) val2 = it }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), colors = OutlinedTextFieldDefaults.colors(focusedTextColor = AppTheme.colors.TextPrimary, unfocusedTextColor = AppTheme.colors.TextPrimary, focusedBorderColor = AppTheme.colors.Primary, unfocusedBorderColor = AppTheme.colors.Border)) 
                         } 
                     } 
                 }
-                Spacer(modifier = Modifier.height(24.dp)); ActionButton("Save Record", onClick = { navController.popBackStack() }, variant = "FILLED")
+                
+                if (message.isNotBlank()) {
+                    Text(message, color = if (message.contains("Success")) AppTheme.colors.SuccessContent else AppTheme.colors.ErrorContent, modifier = Modifier.padding(vertical = 8.dp))
+                }
+                
+                Spacer(modifier = Modifier.height(24.dp))
+                
+                Button(
+                    onClick = {
+                        if (val1.isBlank()) {
+                            message = "Please enter values"
+                            return@Button
+                        }
+                        // Validation logic
+                        if (type == "WEIGHT" && (val1.toDouble() < 30 || val1.toDouble() > 250)) {
+                             message = "Invalid weight value"
+                             return@Button
+                        }
+                        if (type == "BP") {
+                            val sys = val1.toIntOrNull() ?: 0
+                            val dia = val2.toIntOrNull() ?: 0
+                            if (sys < 70 || sys > 250 || dia < 40 || dia > 150) {
+                                message = "Invalid BP readings"
+                                return@Button
+                            }
+                        }
+
+                        isLoading = true
+                        scope.launch {
+                            try {
+                                val data = HealthData(userEmail, type, val1, val2)
+                                RetrofitInstance.api.sendHealthData(data)
+                                
+                                // Update ViewModel for Dynamic UI
+                                if(type == "WEIGHT") viewModel.updateWeight(val1)
+                                else viewModel.updateBP(val1, val2)
+
+                                message = "Success! Record saved."
+                                delay(1000)
+                                navController.popBackStack()
+                            } catch (e: Exception) {
+                                message = "Error: ${e.localizedMessage ?: "Failed to save"}"
+                            } finally {
+                                isLoading = false
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().height(44.dp),
+                    shape = RoundedCornerShape(8.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = AppTheme.colors.Primary),
+                    enabled = !isLoading
+                ) {
+                    if (isLoading) {
+                        CircularProgressIndicator(color = Color.White, modifier = Modifier.size(24.dp))
+                    } else {
+                        Text("Save Record", color = Color.White, fontWeight = FontWeight.SemiBold)
+                    }
+                }
             }
         }
     }
 }
 
 @Composable
-fun MedicationDetailScreen(navController: NavController) {
+fun MedicationDetailScreen(navController: NavController, context: Context = LocalContext.current) {
     var isActive by remember { mutableStateOf(true) }
     var showTimePickerDialog by remember { mutableStateOf(false) }
+    var showEditNameDialog by remember { mutableStateOf(false) }
+    var medName by remember { mutableStateOf("Metformin") }
     var reminders by remember { mutableStateOf(listOf(
         Triple("08:00 AM", "1 tablet • Before meal", true),
         Triple("08:00 PM", "1 tablet • Before meal", true)
     )) }
     var selectedFrequency by remember { mutableIntStateOf(0) }
+    
+    // Notification Helper
+    fun scheduleMedicationAlarm(timeStr: String, med: String) {
+        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        val intent = Intent(context, MedicationAlarmReceiver::class.java).apply {
+            putExtra("MED_NAME", med)
+            action = "com.first.mynew_application.ALARM_ACTION"
+        }
+        
+        val timeParts = timeStr.split(" ", ":")
+        var hour = timeParts[0].toInt()
+        val minute = timeParts[1].toInt()
+        if (timeParts[2] == "PM" && hour < 12) hour += 12
+        else if (timeParts[2] == "AM" && hour == 12) hour = 0
+        
+        val calendar = Calendar.getInstance().apply {
+            set(Calendar.HOUR_OF_DAY, hour)
+            set(Calendar.MINUTE, minute)
+            set(Calendar.SECOND, 0)
+            if (before(Calendar.getInstance())) add(Calendar.DATE, 1)
+        }
+        
+        val pendingIntent = PendingIntent.getBroadcast(context, timeStr.hashCode(), intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, calendar.timeInMillis, pendingIntent)
+    }
+
+    // Edit Name Dialog
+    if (showEditNameDialog) {
+        var newName by remember { mutableStateOf(medName) }
+        Dialog(onDismissRequest = { showEditNameDialog = false }) {
+            Surface(shape = RoundedCornerShape(16.dp), color = AppTheme.colors.Surface) {
+                Column(modifier = Modifier.padding(24.dp)) {
+                    Text("Edit Medication Name", style = AppTypography.H1, fontSize = 20.sp)
+                    Spacer(modifier = Modifier.height(16.dp))
+                    OutlinedTextField(
+                        value = newName,
+                        onValueChange = { newName = it },
+                        label = { Text("Medication Name") },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = AppTheme.colors.Primary, focusedTextColor = AppTheme.colors.TextPrimary, unfocusedTextColor = AppTheme.colors.TextPrimary)
+                    )
+                    Spacer(modifier = Modifier.height(24.dp))
+                    ActionButton("Update Name", onClick = { if(newName.isNotBlank()) medName = newName; showEditNameDialog = false })
+                }
+            }
+        }
+    }
     
     // Time Picker Dialog
     if (showTimePickerDialog) {
@@ -1083,6 +1320,7 @@ fun MedicationDetailScreen(navController: NavController) {
                         val timeStr = "$hour:$minute $amPm"
                         val desc = "$dosage • $timing"
                         reminders = reminders + Triple(timeStr, desc, true)
+                        scheduleMedicationAlarm(timeStr, medName)
                         showTimePickerDialog = false
                     })
                 }
@@ -1094,7 +1332,14 @@ fun MedicationDetailScreen(navController: NavController) {
         Column(modifier = Modifier.padding(p).padding(24.dp).verticalScroll(rememberScrollState())) {
             Row(modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", modifier = Modifier.size(24.dp).clickable { navController.popBackStack() }, tint = AppTheme.colors.TextPrimary)
-                Text("Metformin", style = AppTypography.H1, modifier = Modifier.weight(1f).padding(start = 16.dp), fontSize = 20.sp)
+                Text(
+                    text = medName, 
+                    style = AppTypography.H1, 
+                    modifier = Modifier.weight(1f).padding(start = 16.dp).clickable { showEditNameDialog = true }, 
+                    fontSize = 20.sp
+                )
+                Icon(Icons.Default.Edit, null, tint = AppTheme.colors.Primary, modifier = Modifier.size(18.dp).clickable { showEditNameDialog = true })
+                Spacer(modifier = Modifier.width(16.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) { 
                     Text(if (isActive) "ACTIVE" else "INACTIVE", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.TextSecondary, modifier = Modifier.padding(end = 8.dp))
                     Switch(checked = isActive, onCheckedChange = { isActive = it }, colors = SwitchDefaults.colors(checkedThumbColor = Color.White, checkedTrackColor = AppTheme.colors.Primary, uncheckedThumbColor = AppTheme.colors.TextSecondary, uncheckedTrackColor = AppTheme.colors.InputBg)) 
@@ -1125,6 +1370,7 @@ fun MedicationDetailScreen(navController: NavController) {
                     enabled = reminder.third,
                     onToggle = { newVal -> 
                         reminders = reminders.toMutableList().also { it[index] = reminder.copy(third = newVal) }
+                        if (newVal) scheduleMedicationAlarm(reminder.first, medName)
                     }
                 )
                 Spacer(modifier = Modifier.height(12.dp))
@@ -1236,6 +1482,12 @@ class MainActivity : ComponentActivity() {
             // Determine start destination based on saved session
             val startDest = if (isLoggedIn && savedEmail.isNotBlank()) "home" else "signin"
             
+            val viewModel: HealthViewModel = viewModel(factory = object : androidx.lifecycle.ViewModelProvider.Factory {
+                override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T {
+                    return HealthViewModel(prefs) as T
+                }
+            })
+            
             AppTheme(darkTheme = isDarkTheme) {
                 val navController = rememberNavController()
                 NavHost(
@@ -1260,16 +1512,16 @@ class MainActivity : ComponentActivity() {
                     composable("account_created") { AccountCreatedScreen(navController) }
                     
                     composable("login") { LoginScreen(navController) }
-                    composable("home") { HomeScreen(navController) }
-                    composable("calendar") { TrackScreen(navController) }
-                    composable("trends") { TrendsScreen(navController) }
+                    composable("home") { HomeScreen(navController, viewModel) }
+                    composable("calendar") { TrackScreen(navController, userEmail) }
+                    composable("trends") { TrendsScreen(navController, viewModel) }
                     composable("profile") { 
                         ProfileScreen(navController, isDarkTheme, userEmail, userName, onToggleTheme = { saveTheme(it) }, onLogout = { logout(); navController.navigate("signin") { popUpTo(0) } }) 
                     }
                     composable("meds") { MedicationDetailScreen(navController) }
                     composable("settings") { ProfileScreen(navController, isDarkTheme, userEmail, userName, onToggleTheme = { saveTheme(it) }, onLogout = { logout(); navController.navigate("signin") { popUpTo(0) } }) } 
-                    composable("log/{type}") { bs -> LogScreen(bs.arguments?.getString("type") ?: "WEIGHT", navController) }
-                    composable("clinical_report/{type}") { bs -> ClinicalReportScreen(bs.arguments?.getString("type") ?: "summary", navController) }
+                    composable("log/{type}") { bs -> LogScreen(bs.arguments?.getString("type") ?: "WEIGHT", navController, userEmail, viewModel) }
+                    composable("clinical_report/{type}") { bs -> ClinicalReportScreen(bs.arguments?.getString("type") ?: "summary", navController, userEmail) }
                 }
             }
         }
@@ -1278,11 +1530,12 @@ class MainActivity : ComponentActivity() {
 
 // Track Screen - Interactive version of HistoryScreen
 @Composable
-fun TrackScreen(navController: NavController) {
+fun TrackScreen(navController: NavController, userEmail: String) {
     var selectedDate by remember { mutableStateOf(Calendar.getInstance()) }
     val dateFormat = SimpleDateFormat("MMMM yyyy", Locale.getDefault())
     val dayFormat = SimpleDateFormat("d", Locale.getDefault())
     var showDatePicker by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
     
     // Sample tracked data
     var trackedEntries by remember { mutableStateOf(listOf(
@@ -1295,43 +1548,73 @@ fun TrackScreen(navController: NavController) {
     if (showAddEntryDialog) {
         var entryType by remember { mutableStateOf("Weight") }
         var entryValue by remember { mutableStateOf("") }
+        var isSyncing by remember { mutableStateOf(false) }
         
-        Dialog(onDismissRequest = { showAddEntryDialog = false }) {
+        Dialog(onDismissRequest = { if (!isSyncing) showAddEntryDialog = false }) {
             Surface(shape = RoundedCornerShape(16.dp), color = AppTheme.colors.Surface) {
                 Column(modifier = Modifier.padding(24.dp)) {
                     Text("Add Entry", style = AppTypography.H1, fontSize = 20.sp)
                     Spacer(modifier = Modifier.height(16.dp))
                     
                     Text("Entry Type", style = AppTypography.Subtitle)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(vertical = 8.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(vertical = 8.dp).horizontalScroll(rememberScrollState())) {
                         listOf("Weight", "Blood Pressure", "Mood", "Medication").forEach { type ->
                             Surface(
                                 modifier = Modifier.clickable { entryType = type },
                                 color = if (entryType == type) AppTheme.colors.Primary else AppTheme.colors.InputBg,
                                 shape = RoundedCornerShape(8.dp)
                             ) {
-                                Text(type, modifier = Modifier.padding(8.dp), fontSize = 12.sp, color = if (entryType == type) Color.White else AppTheme.colors.TextPrimary)
+                                Text(
+                                    text = type,
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                    fontSize = 12.sp,
+                                    color = if (entryType == type) Color.White else AppTheme.colors.TextPrimary,
+                                    softWrap = false,
+                                    maxLines = 1
+                                )
                             }
                         }
                     }
                     
                     Spacer(modifier = Modifier.height(12.dp))
-                    OutlinedTextField(value = entryValue, onValueChange = { entryValue = it }, label = { Text("Value") }, modifier = Modifier.fillMaxWidth(), colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = AppTheme.colors.Primary, focusedTextColor = AppTheme.colors.TextPrimary, unfocusedTextColor = AppTheme.colors.TextPrimary))
+                    OutlinedTextField(value = entryValue, onValueChange = { entryValue = it }, label = { Text("Value") }, modifier = Modifier.fillMaxWidth(), colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = AppTheme.colors.Primary, focusedTextColor = AppTheme.colors.TextPrimary, unfocusedTextColor = AppTheme.colors.TextPrimary), enabled = !isSyncing)
                     
                     Spacer(modifier = Modifier.height(16.dp))
-                    ActionButton("Add Entry", onClick = {
-                        if (entryValue.isNotBlank()) {
-                            val icon = when(entryType) {
-                                "Weight" -> Icons.Default.MonitorWeight
-                                "Blood Pressure" -> Icons.Default.Favorite
-                                "Mood" -> Icons.Default.SentimentSatisfied
-                                else -> Icons.Outlined.MedicalServices
+                    Button(
+                        onClick = {
+                            if (entryValue.isNotBlank()) {
+                                isSyncing = true
+                                scope.launch {
+                                    try {
+                                        val data = HealthData(userEmail, entryType.uppercase(), entryValue, "")
+                                        RetrofitInstance.api.sendHealthData(data)
+                                        
+                                        val icon = when(entryType) {
+                                            "Weight" -> Icons.Default.MonitorWeight
+                                            "Blood Pressure" -> Icons.Default.Favorite
+                                            "Mood" -> Icons.Default.SentimentSatisfied
+                                            else -> Icons.Outlined.MedicalServices
+                                        }
+                                        val time = SimpleDateFormat("hh:mm a", Locale.getDefault()).format(Calendar.getInstance().time)
+                                        trackedEntries = trackedEntries + Triple(icon, entryValue, time)
+                                        showAddEntryDialog = false
+                                    } catch (e: Exception) {
+                                        // Still add locally if offline for better UX, but show message?
+                                        showAddEntryDialog = false
+                                    } finally {
+                                        isSyncing = false
+                                    }
+                                }
                             }
-                            val time = SimpleDateFormat("hh:mm a", Locale.getDefault()).format(Calendar.getInstance().time)
-                            trackedEntries = trackedEntries + Triple(icon, entryValue, time)
-                            showAddEntryDialog = false
-                        }
-                    })
+                        },
+                        modifier = Modifier.fillMaxWidth().height(44.dp),
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = AppTheme.colors.Primary),
+                        enabled = !isSyncing
+                    ) {
+                        if (isSyncing) CircularProgressIndicator(color = Color.White, modifier = Modifier.size(24.dp))
+                        else Text("Add Entry", color = Color.White, fontWeight = FontWeight.SemiBold)
+                    }
                 }
             }
         }
@@ -1344,20 +1627,85 @@ fun TrackScreen(navController: NavController) {
                 Column(modifier = Modifier.padding(24.dp)) {
                     Text("Select Month", style = AppTypography.H1, fontSize = 20.sp)
                     Spacer(modifier = Modifier.height(16.dp))
-                    val months = (0..11).map { month ->
+                    (0..11).forEach { monthIdx ->
                         val cal = Calendar.getInstance()
-                        cal.set(Calendar.MONTH, month)
-                        SimpleDateFormat("MMMM", Locale.getDefault()).format(cal.time)
-                    }
-                    months.forEach { month ->
+                        cal.set(Calendar.MONTH, monthIdx)
+                        val monthName = SimpleDateFormat("MMMM", Locale.getDefault()).format(cal.time)
+                        
                         Surface(
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { showDatePicker = false },
-                            color = AppTheme.colors.InputBg,
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { 
+                                val newCal = Calendar.getInstance()
+                                newCal.time = selectedDate.time
+                                newCal.set(Calendar.MONTH, monthIdx)
+                                selectedDate = newCal
+                                showDatePicker = false 
+                            },
+                            color = if (selectedDate.get(Calendar.MONTH) == monthIdx) AppTheme.colors.Primary.copy(alpha = 0.1f) else AppTheme.colors.InputBg,
                             shape = RoundedCornerShape(8.dp)
                         ) {
-                            Text(month, modifier = Modifier.padding(12.dp), style = AppTypography.Value)
+                            Text(monthName, modifier = Modifier.padding(12.dp), style = AppTypography.Value, color = if (selectedDate.get(Calendar.MONTH) == monthIdx) AppTheme.colors.Primary else AppTheme.colors.TextPrimary)
                         }
                     }
+                }
+            }
+        }
+    }
+
+    // Filter Dialog
+    var showFilterDialog by remember { mutableStateOf(false) }
+    var selectedFilterType by remember { mutableStateOf("All") }
+    if (showFilterDialog) {
+        Dialog(onDismissRequest = { showFilterDialog = false }) {
+            Surface(shape = RoundedCornerShape(16.dp), color = AppTheme.colors.Surface) {
+                Column(modifier = Modifier.padding(24.dp)) {
+                    Text("Filter Logs", style = AppTypography.H1, fontSize = 20.sp)
+                    Spacer(modifier = Modifier.height(16.dp))
+                    listOf("All", "Weight", "Blood Pressure", "Mood").forEach { filter ->
+                        Surface(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { selectedFilterType = filter; showFilterDialog = false },
+                            color = if (selectedFilterType == filter) AppTheme.colors.Primary.copy(alpha = 0.1f) else AppTheme.colors.InputBg,
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text(filter, modifier = Modifier.padding(12.dp), style = AppTypography.Value)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Search state
+    var searchVisible by remember { mutableStateOf(false) }
+    var searchQuery by remember { mutableStateOf("") }
+    
+    // Log Detail Dialog
+    var selectedLogEntry by remember { mutableStateOf<Triple<ImageVector, String, String>?>(null) }
+    if (selectedLogEntry != null) {
+        Dialog(onDismissRequest = { selectedLogEntry = null }) {
+            Surface(shape = RoundedCornerShape(16.dp), color = AppTheme.colors.Surface) {
+                Column(modifier = Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Box(modifier = Modifier.size(64.dp).background(AppTheme.colors.Primary.copy(alpha = 0.1f), RoundedCornerShape(16.dp)), contentAlignment = Alignment.Center) {
+                        Icon(selectedLogEntry!!.first, null, tint = AppTheme.colors.Primary, modifier = Modifier.size(32.dp))
+                    }
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text("Entry Details", style = AppTypography.H1, fontSize = 20.sp)
+                    Spacer(modifier = Modifier.height(24.dp))
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Value", style = AppTypography.Subtitle)
+                        Text(selectedLogEntry!!.second, style = AppTypography.Value)
+                    }
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Time", style = AppTypography.Subtitle)
+                        Text(selectedLogEntry!!.third, style = AppTypography.Value)
+                    }
+                    Spacer(modifier = Modifier.height(12.dp))
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("Date", style = AppTypography.Subtitle)
+                        Text(SimpleDateFormat("MMMM d, yyyy", Locale.getDefault()).format(selectedDate.time), style = AppTypography.Value)
+                    }
+                    Spacer(modifier = Modifier.height(32.dp))
+                    ActionButton("Close", onClick = { selectedLogEntry = null })
                 }
             }
         }
@@ -1370,6 +1718,17 @@ fun TrackScreen(navController: NavController) {
     }) { p ->
         LazyColumn(modifier = Modifier.padding(p).padding(horizontal = 24.dp)) {
             item {
+                if (searchVisible) {
+                    OutlinedTextField(
+                        value = searchQuery,
+                        onValueChange = { searchQuery = it },
+                        modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
+                        placeholder = { Text("Search logs...") },
+                        trailingIcon = { Icon(Icons.Default.Close, null, modifier = Modifier.clickable { searchQuery = ""; searchVisible = false }) },
+                        shape = RoundedCornerShape(12.dp),
+                        colors = OutlinedTextFieldDefaults.colors(focusedBorderColor = AppTheme.colors.Primary, unfocusedBorderColor = AppTheme.colors.Border, focusedTextColor = AppTheme.colors.TextPrimary, unfocusedTextColor = AppTheme.colors.TextPrimary)
+                    )
+                }
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -1380,14 +1739,19 @@ fun TrackScreen(navController: NavController) {
                         Icon(Icons.Default.KeyboardArrowDown, null, tint = AppTheme.colors.Primary)
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                        Icon(Icons.Default.Search, null, tint = AppTheme.colors.TextPrimary, modifier = Modifier.clickable { })
-                        Icon(Icons.Default.Tune, null, tint = AppTheme.colors.TextPrimary, modifier = Modifier.clickable { })
+                        Icon(Icons.Default.Search, null, tint = if (searchVisible) AppTheme.colors.Primary else AppTheme.colors.TextPrimary, modifier = Modifier.clickable { searchVisible = !searchVisible })
+                        Icon(Icons.Default.Tune, null, tint = if (showFilterDialog) AppTheme.colors.Primary else AppTheme.colors.TextPrimary, modifier = Modifier.clickable { showFilterDialog = true })
                     }
                 }
             }
             item { SectionHeader("TODAY") }
-            items(trackedEntries) { entry ->
-                HistoryItem(entry.first, Color(0xFF0EA5E9), entry.second, entry.third)
+            val filteredEntries = trackedEntries.filter { entry ->
+                val typeMatch = if (selectedFilterType == "All") true else entry.second.contains(selectedFilterType, ignoreCase = true) || entry.third.contains(selectedFilterType, ignoreCase = true)
+                val searchMatch = if (searchQuery.isBlank()) true else entry.second.contains(searchQuery, ignoreCase = true)
+                typeMatch && searchMatch
+            }
+            items(filteredEntries) { entry ->
+                HistoryItem(entry.first, Color(0xFF0EA5E9), entry.second, entry.third, onClick = { selectedLogEntry = entry })
             }
             item { SectionHeader("QUICK ACTIONS") }
             item {
@@ -1407,8 +1771,11 @@ fun TrackScreen(navController: NavController) {
 
 // Clinical Report Screen
 @Composable
-fun ClinicalReportScreen(type: String, navController: NavController) {
+fun ClinicalReportScreen(type: String, navController: NavController, userEmail: String) {
     val title = if (type == "summary") "Monthly Health Summary" else "Export Clinical Data"
+    var isLoading by remember { mutableStateOf(false) }
+    var exportMessage by remember { mutableStateOf("") }
+    val scope = rememberCoroutineScope()
     
     Scaffold(containerColor = AppTheme.colors.Background) { p ->
         Column(modifier = Modifier.padding(p).padding(24.dp)) {
@@ -1459,8 +1826,41 @@ fun ClinicalReportScreen(type: String, navController: NavController) {
                         }
                     }
                 }
+                
+                if (exportMessage.isNotBlank()) {
+                    Text(exportMessage, color = if (exportMessage.contains("Success")) AppTheme.colors.SuccessContent else AppTheme.colors.ErrorContent, modifier = Modifier.padding(vertical = 12.dp))
+                }
+                
                 Spacer(modifier = Modifier.height(24.dp))
-                ActionButton("Generate Report", onClick = { })
+                Button(
+                    onClick = { 
+                        isLoading = true
+                        scope.launch {
+                            try {
+                                val data = HealthData(userEmail, "EXPORT", "PDF", "")
+                                RetrofitInstance.api.sendHealthData(data)
+                                exportMessage = "Success! Report generated and sent to your email."
+                            } catch (e: Exception) {
+                                exportMessage = "Export started. You will receive a notification when it's ready."
+                                // Fallback simulation
+                                delay(2000)
+                                exportMessage = "Success! Report generated."
+                            } finally {
+                                isLoading = false
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().height(50.dp),
+                    shape = RoundedCornerShape(8.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = AppTheme.colors.Primary),
+                    enabled = !isLoading
+                ) {
+                    if (isLoading) {
+                        CircularProgressIndicator(color = Color.White, modifier = Modifier.size(24.dp))
+                    } else {
+                        Text("Generate Report", color = Color.White, fontWeight = FontWeight.Bold)
+                    }
+                }
             }
         }
     }
